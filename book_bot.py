@@ -25,6 +25,7 @@ from pynytimes import NYTAPI
 from io import BytesIO
 from dotenv import load_dotenv
 from openai import OpenAI, AsyncOpenAI
+from bs4 import BeautifulSoup
 
 project_folder = os.path.expanduser('~')
 load_dotenv(os.path.join(project_folder, '.env'))
@@ -36,11 +37,17 @@ CHAT_ID = os.environ['TELEGRAM_CHAT_ID']
 tele_app = Application.builder().token(BOOK_BOT_TOKEN).read_timeout(15).build()
 telegram_bot = tele_app.bot
 
-openai_client = AsyncOpenAI(
-    api_key=os.environ.get("OPENAI_API_KEY"),
-)
+proxies = {
+  "http": "http://proxy.server:3128"
+}
+
+# openai_client = AsyncOpenAI(
+#     api_key=os.environ.get("OPENAI_API_KEY"),
+# )
 
 MY_BOOKS = "Shift By Howey Hugh, Heat 2 by Michael Mann, Legends and Lattes by Travis Baldree, Going Postal by Terry Pratchett"
+
+
 
 def get_nyt_bestsellers():
 	print("Getting New York Times best sellers")
@@ -52,7 +59,7 @@ def get_nyt_bestsellers():
 		# print("Finding books in: ", book_category)
 		best_sellers = nyt.best_sellers_list(name=book_category, date=None)
 		books = [{
-					"title": book["title"], 
+					"title": book["title"],
 					"author": book["author"],
 					"book_image": book["book_image"],
 					"amazon_product_url": book["amazon_product_url"],
@@ -71,10 +78,10 @@ def split_string_into_chunks(input_string, chunk_size):
     while current_position < len(input_string):
         # Determine the end of the current chunk
         end_position = current_position + chunk_size
-        
+
         # Find the closest line break before the end position
         line_break_position = input_string.rfind('\n', current_position, end_position)
-        
+
         if line_break_position == -1:
             # If no line break is found, take the rest of the string
             chunks.append(input_string[current_position:])
@@ -102,10 +109,10 @@ def format_message(collections):
 def escape_selected_characters(input_string, characters_to_escape):
     # Create a regex pattern to match any of the characters to escape
     pattern = f"[{re.escape(characters_to_escape)}]"
-    
+
     # Replace each matched character with its escaped version
     escaped_string = re.sub(pattern, lambda x: f"\\{x.group(0)}", input_string)
-    
+
     return escaped_string
 
 def format_message_markdown(collections):
@@ -163,9 +170,9 @@ def send_telegram_message(data, format=None):
 		response = requests.post(url, data=payload)
 
 		if response.status_code != 200:
-		    print("Failed to send message.")
-		    print(response.reason)
-		    print(response.text)
+			print("Failed to send message.")
+			print(response.reason)
+			print(response.text)
 
 def split_into_chunks(array, chunk_size):
     if chunk_size <= 0:
@@ -191,10 +198,14 @@ async def send_book_images(best_sellers, download=True):
 				media=InputMediaPhoto(media=best_seller['book_image'], caption=f"https://www.goodreads.com/search?q={best_seller['isbn']}")
 				images.append(media)
 
-		images_in_chunks = split_into_chunks(images, 10)
+		images_in_chunks = split_into_chunks(images, 5)
 		for images_chunk in images_in_chunks:
-			await telegram_bot.send_media_group(chat_id=CHAT_ID, media=images_chunk)
-			await asyncio.sleep(3)
+			try:
+				await telegram_bot.send_media_group(chat_id=CHAT_ID, media=images_chunk)
+				await asyncio.sleep(3)
+			except Exception as e:
+				print(e)
+				print("Error sending book images")
 
 async def filter_books_using_chatgpt(books):
 	book_string = ""
@@ -233,6 +244,15 @@ async def find_book_on_openlibrary(title):
 	except:
 		return {}
 
+def deEmojify(text):
+    regrex_pattern = re.compile(pattern = "["
+        u"\U0001F600-\U0001F64F"  # emoticons
+        u"\U0001F300-\U0001F5FF"  # symbols & pictographs
+        u"\U0001F680-\U0001F6FF"  # transport & map symbols
+        u"\U0001F1E0-\U0001F1FF"  # flags (iOS)
+                           "]+", flags = re.UNICODE)
+    return regrex_pattern.sub(r'',text)
+
 def parse_reddit_comment(comment):
 	book = {}
 	lines = comment.split("\n")
@@ -246,37 +266,49 @@ def parse_reddit_comment(comment):
 			if len(book_arr) > 1:
 				book_title = book_arr[0].strip()
 				book_author = book_arr[1].strip()
-				book = {"title": book_title, 
-						"author": book_author}
+				book = {"title": book_title,
+						"author": deEmojify(book_author)}
 	return book
 
-async def find_books_on_reddit(limit=10):
+async def find_books_on_reddit(thread_id, limit=10):
 	print("Getting books from Reddit")
-	session = ClientSession(trust_env=True)
-	reddit = asyncpraw.Reddit(
-	    client_id=os.environ['REDDIT_CLIENT_ID'],
-	    client_secret=os.environ['REDDIT_CLIENT_SECRET'],
-	    requestor_kwargs={"session": session},
-	    user_agent="python:bookbot:v1.0.0 (by u/Boris_Abramovich)"
-	)
-	weekly_reading_thread_id = "1f1kfjy"
-	submission = await reddit.submission(weekly_reading_thread_id)
-	books = []
-	await submission.comments.replace_more(limit=limit)
-	comments = submission.comments.list()
-	comments.reverse()
-	for comment in comments:
-		book = parse_reddit_comment(comment.body)
-		if book.get("title") is not None:
-			book_openlib = await find_book_on_openlibrary(book["title"])
-			book.update(book_openlib)
-		if book:
-			books.append(book)
-			if len(books) == 30:
-				break
-					
-	await reddit.close()
-	return books
+	if thread_id:
+		session = ClientSession(trust_env=True)
+		reddit = asyncpraw.Reddit(
+		    client_id=os.environ['REDDIT_CLIENT_ID'],
+		    client_secret=os.environ['REDDIT_CLIENT_SECRET'],
+		    requestor_kwargs={"session": session},
+		    user_agent="python:bookbot:v1.0.0 (by u/Boris_Abramovich)"
+		)
+		submission = await reddit.submission(thread_id)
+		books = []
+		await submission.comments.replace_more(limit=limit)
+		comments = submission.comments.list()
+		comments.reverse()
+		for comment in comments:
+			book = parse_reddit_comment(comment.body)
+			if book.get("title") is not None:
+				book_openlib = await find_book_on_openlibrary(book["title"])
+				book.update(book_openlib)
+			if book:
+				books.append(book)
+				if len(books) == 30:
+					break
+
+		await reddit.close()
+		return books
+
+def scrape_reddit_books():
+	url = "https://www.reddit.com/r/books/"  # Replace with your target URL
+	response = requests.get(url, proxies=proxies)
+	print(response)
+	html_content = response.text
+	soup = BeautifulSoup(html_content, 'html.parser')
+	elements = soup.find_all('faceplate-tracker', {'source': 'community_menu'})
+	for element in elements:
+		if element.text.strip() == "What We're Reading":
+			a = element.find('a')
+			return a['href'].split('/')[-1]
 
 async def main():
 	dt = datetime.now()
@@ -285,15 +317,13 @@ async def main():
 		nyt_best_sellers = get_nyt_bestsellers()
 		await send_book_images(nyt_best_sellers, download=False)
 	elif weekday in [0,2,4]:
-		reddit_books = await find_books_on_reddit()
+		reddit_thread_id = scrape_reddit_books()
+		print("Reddit thread id:", reddit_thread_id)
+		reddit_books = await find_books_on_reddit(reddit_thread_id, limit=100)
 		await send_book_images(reddit_books, download=False)
 	else:
 		print(f"Doing nothing, weekday is {weekday}")
 
+
 if __name__ == '__main__':
 	asyncio.run(main())
-
-
-
-
-
